@@ -2,8 +2,9 @@ name: Sholat Reminder
 
 on:
   schedule:
-    # Every 5 minutes, all hours (testing scheduler)
-    - cron: '*/5 * * * *'
+    # Every 5 minutes from 04:00–19:00 WIB (Jakarta)
+    # GitHub UTC = WIB - 7 → 21:00–12:00 UTC
+    - cron: '*/5 21-23,0-12 * * *'
   workflow_dispatch:  # manual trigger for testing
 
 jobs:
