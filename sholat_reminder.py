@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Prayer time reminder — deployed to GitHub Actions.
-Fetches daily prayer times from Aladhan API and sends Telegram notifications.
+Fetches daily prayer times from MyQuran first, with Aladhan fallback, and sends Telegram notifications.
 State persisted in state.json (auto-committed by the workflow).
 Now with random hadith excerpts!
 """
@@ -9,7 +9,10 @@ import json
 import os
 import random
 import sys
+import time
 from datetime import datetime, timedelta, timezone
+from urllib.error import HTTPError, URLError
+from urllib.parse import quote
 from urllib.request import urlopen, Request
 
 # === CONFIG ===
@@ -18,6 +21,10 @@ COUNTRY = os.environ.get("PRAYER_COUNTRY", "Indonesia")
 METHOD = int(os.environ.get("PRAYER_METHOD", "20"))  # 20 = Kemenag RI
 WINDOW_MINUTES = int(os.environ.get("PRAYER_WINDOW", "3"))
 STATE_FILE = os.environ.get("STATE_FILE", "state.json")
+PRAYER_PROVIDER = os.environ.get("PRAYER_PROVIDER", "auto").strip().lower()
+MYQURAN_CITY_ID = os.environ.get("PRAYER_CITY_ID", "").strip()
+API_RETRIES = int(os.environ.get("PRAYER_API_RETRIES", "3"))
+API_BACKOFF_SECONDS = float(os.environ.get("PRAYER_API_BACKOFF", "1.5"))
 
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
@@ -178,19 +185,128 @@ def get_random_hadith():
     return random.choice(HADITH_LIST)
 
 
-def fetch_prayer_times():
+def request_json(url, *, timeout=10):
+    """Fetch JSON with retries for transient HTTP/network errors."""
+    last_error = None
+    retry_statuses = {429, 500, 502, 503, 504}
+
+    for attempt in range(1, API_RETRIES + 1):
+        try:
+            req = Request(
+                url,
+                headers={
+                    "User-Agent": "Hermes-SholatReminder/3.0",
+                    "Accept": "application/json",
+                },
+            )
+            with urlopen(req, timeout=timeout) as resp:
+                return json.loads(resp.read().decode())
+        except HTTPError as exc:
+            last_error = exc
+            if exc.code not in retry_statuses or attempt == API_RETRIES:
+                break
+        except URLError as exc:
+            last_error = exc
+            if attempt == API_RETRIES:
+                break
+
+        sleep_for = API_BACKOFF_SECONDS * attempt
+        print(
+            f"Transient API error on {url} (attempt {attempt}/{API_RETRIES}); retrying in {sleep_for:.1f}s",
+            file=sys.stderr,
+        )
+        time.sleep(sleep_for)
+
+    raise last_error
+
+
+def normalize_prayer_value(value):
+    """Strip extra annotations from API time values."""
+    return str(value).split()[0]
+
+
+def resolve_myquran_city_id():
+    """Resolve the MyQuran city id from config or search endpoint."""
+    if MYQURAN_CITY_ID:
+        return MYQURAN_CITY_ID
+
+    search_url = f"https://api.myquran.com/v2/sholat/kota/cari/{quote(CITY)}"
+    data = request_json(search_url)
+    if not data.get("status") or not data.get("data"):
+        raise RuntimeError(f"MyQuran city search failed for {CITY!r}: {data}")
+
+    normalized_city = CITY.strip().lower()
+    matches = data["data"]
+
+    def match_rank(item):
+        lokasi = str(item.get("lokasi", "")).strip().lower()
+        if lokasi == normalized_city:
+            return 0
+        if normalized_city in lokasi:
+            return 1
+        return 2
+
+    best = sorted(matches, key=match_rank)[0]
+    city_id = str(best.get("id", "")).strip()
+    if not city_id:
+        raise RuntimeError(f"MyQuran search returned invalid city data for {CITY!r}: {best}")
+    return city_id
+
+
+def fetch_prayer_times_myquran(now):
+    """Fetch today's prayer times from MyQuran."""
+    city_id = resolve_myquran_city_id()
+    url = (
+        f"https://api.myquran.com/v2/sholat/jadwal/{city_id}"
+        f"/{now:%Y}/{now:%m}/{now:%d}"
+    )
+    data = request_json(url)
+    if not data.get("status"):
+        raise RuntimeError(f"MyQuran API error: {data}")
+
+    jadwal = data["data"]["jadwal"]
+    return {
+        "Fajr": normalize_prayer_value(jadwal["subuh"]),
+        "Dhuhr": normalize_prayer_value(jadwal["dzuhur"]),
+        "Asr": normalize_prayer_value(jadwal["ashar"]),
+        "Maghrib": normalize_prayer_value(jadwal["maghrib"]),
+        "Isha": normalize_prayer_value(jadwal["isya"]),
+    }
+
+
+def fetch_prayer_times_aladhan():
     """Fetch today's prayer times from Aladhan API."""
     url = (
         f"https://api.aladhan.com/v1/timingsByCity"
-        f"?city={CITY}&country={COUNTRY}&method={METHOD}"
+        f"?city={quote(CITY)}&country={quote(COUNTRY)}&method={METHOD}"
     )
-    req = Request(url, headers={"User-Agent": "Hermes-SholatReminder/2.0"})
-    with urlopen(req, timeout=10) as resp:
-        data = json.loads(resp.read().decode())
-    if data["code"] != 200:
-        raise RuntimeError(f"API error: {data}")
+    data = request_json(url)
+    if data.get("code") != 200:
+        raise RuntimeError(f"Aladhan API error: {data}")
     timings = data["data"]["timings"]
-    return {k: timings[k] for k in PRAYER_NAMES}
+    return {k: normalize_prayer_value(timings[k]) for k in PRAYER_NAMES}
+
+
+def fetch_prayer_times(now):
+    """Fetch today's prayer times with MyQuran first, Aladhan fallback."""
+    providers = ["myquran", "aladhan"]
+    if PRAYER_PROVIDER in {"myquran", "aladhan"}:
+        providers = [PRAYER_PROVIDER]
+
+    errors = []
+    for provider in providers:
+        try:
+            if provider == "myquran":
+                prayers = fetch_prayer_times_myquran(now)
+            else:
+                prayers = fetch_prayer_times_aladhan()
+            print(f"Prayer times source: {provider}")
+            return prayers
+        except Exception as exc:
+            errors.append(f"{provider}: {exc}")
+            print(f"Prayer source failed: {provider}: {exc}", file=sys.stderr)
+
+    raise RuntimeError("; ".join(errors))
 
 
 def load_state():
@@ -240,7 +356,7 @@ def main():
 
     # Fetch prayer times
     try:
-        prayers = fetch_prayer_times()
+        prayers = fetch_prayer_times(now)
     except Exception as e:
         print(f"Failed to fetch prayer times: {e}", file=sys.stderr)
         sys.exit(1)
