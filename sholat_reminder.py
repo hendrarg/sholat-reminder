@@ -20,6 +20,7 @@ CITY = os.environ.get("PRAYER_CITY", "Jakarta")
 COUNTRY = os.environ.get("PRAYER_COUNTRY", "Indonesia")
 METHOD = int(os.environ.get("PRAYER_METHOD", "20"))  # 20 = Kemenag RI
 WINDOW_MINUTES = int(os.environ.get("PRAYER_WINDOW", "10"))
+TARGET_PRAYER = os.environ.get("PRAYER_TARGET", "Maghrib").strip()
 STATE_FILE = os.environ.get("STATE_FILE", "state.json")
 PRAYER_PROVIDER = os.environ.get("PRAYER_PROVIDER", "auto").strip().lower()
 MYQURAN_CITY_ID = os.environ.get("PRAYER_CITY_ID", "").strip()
@@ -368,16 +369,16 @@ def main():
 
     reminders = []
 
-    for key, name in PRAYER_NAMES.items():
-        if key not in prayers:
-            continue
+    if TARGET_PRAYER not in PRAYER_NAMES:
+        raise RuntimeError(f"Unsupported PRAYER_TARGET: {TARGET_PRAYER!r}")
 
-        prayer_h, prayer_m = parse_time(prayers[key])
+    if TARGET_PRAYER in prayers:
+        prayer_h, prayer_m = parse_time(prayers[TARGET_PRAYER])
         diff = (now.hour * 60 + now.minute) - (prayer_h * 60 + prayer_m)
 
-        if abs(diff) <= WINDOW_MINUTES and key not in state:
-            state[key] = now.strftime("%H:%M")
-            reminders.append(f"{name}: {prayers[key]} WIB")
+        if abs(diff) <= WINDOW_MINUTES and TARGET_PRAYER not in state:
+            state[TARGET_PRAYER] = now.strftime("%H:%M")
+            reminders.append(f"{PRAYER_NAMES[TARGET_PRAYER]}: {prayers[TARGET_PRAYER]} WIB")
 
     # If anything changed, save state
     if reminders:
