@@ -19,7 +19,7 @@ from urllib.request import urlopen, Request
 CITY = os.environ.get("PRAYER_CITY", "Jakarta")
 COUNTRY = os.environ.get("PRAYER_COUNTRY", "Indonesia")
 METHOD = int(os.environ.get("PRAYER_METHOD", "20"))  # 20 = Kemenag RI
-WINDOW_MINUTES = int(os.environ.get("PRAYER_WINDOW", "3"))
+WINDOW_MINUTES = int(os.environ.get("PRAYER_WINDOW", "10"))
 STATE_FILE = os.environ.get("STATE_FILE", "state.json")
 PRAYER_PROVIDER = os.environ.get("PRAYER_PROVIDER", "auto").strip().lower()
 MYQURAN_CITY_ID = os.environ.get("PRAYER_CITY_ID", "").strip()
